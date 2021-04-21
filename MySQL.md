@@ -59,3 +59,20 @@
 
 # 日志系统
 
+```create table T(ID int primary key, c int);```
+
+```update T set c=c+1 where ID=2;```
+
+这是一条普通的更新语句，执行流程和之前的查询语句基本类似：
+
+1. 连接器连接数据库
+2. 分析器分析为更新语句
+3. 优化器优化
+4. 执行器具体执行
+5. 记录日志
+
+与查询语句的不同在于更新语句需要记录日志，而两个日志模块最重要：redo log、binlog
+
+## redo log
+
+在MySQL中，为了数据持久化，所有数据都需要存入磁盘中，日志也一样，但如果每次记入磁盘IO压力过大，因此考虑使用WAL(Write Ahead Logging)技术进行优化。具体来说，以InnoDB为例，当有记录需要更新时，InnoDB会把记录写到redo log中，并更新内存；之后当InnoDB空闲时，将操作记录更新到磁盘。
