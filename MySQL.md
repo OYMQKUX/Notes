@@ -75,4 +75,44 @@
 
 ## redo log
 
-在MySQL中，为了数据持久化，所有数据都需要存入磁盘中，日志也一样，但如果每次记入磁盘IO压力过大，因此考虑使用WAL(Write Ahead Logging)技术进行优化。具体来说，以InnoDB为例，当有记录需要更新时，InnoDB会把记录写到redo log中，并更新内存；之后当InnoDB空闲时，将操作记录更新到磁盘。
+在MySQL中，为了数据持久化，所有数据都需要存入磁盘中，日志也一样，但如果每次记入磁盘IO压力过大，因此考虑使用WAL(Write Ahead Logging)技术进行优化。具体来说，以InnoDB为例，当有记录需要更新时，InnoDB会把记录写到redo log中，并更新内存；之后当InnoDB空闲时，将操作记录更新到磁盘。redo log的大小是固定的，可以配置为一组4个文件，每个文件1GB，当记录超过4GB，那么写入指针指向开通从头开始写，如下图所示：
+
+![图1](https://static001.geekbang.org/resource/image/b0/9c/b075250cad8d9f6c791a52b6a600f69c.jpg)
+
+write pos为写指针的位置，check point为擦除指针的位置，两个指针都向后移动，在check point移动时需要擦除数据同时把数据更新到数据文件。如果write pos和check point之间没有额外空间了，就需要停止更新，执行擦除。有了redo log，InnoDb就可以保证即使数据库异常重启，提交记录也不会丢失，称之为**crash-safe**。
+
+## binlog
+
+redo log是存储层InnoDB引擎的日志，而server层的日志就是binlog。两者有几点不同：
+
+1. redo log是InnoDB引擎特有的，binlog是MySQL中server层实现的，所有引擎都可以使用。
+2. redo log是物理日志，记录的是数据的具体修改；而binlog是逻辑日志，记录语句的原始逻辑；
+3. redo log固定大小，空间写完要执行擦除；binlog写完一个文件会切到下一个文件
+
+## 过程分析
+
+以之前简单的Update语句为例进行分析：
+
+![过程](https://static001.geekbang.org/resource/image/2e/be/2e5bff4910ec189fe1ee6e2ecc7b4bbe.png)
+
+**浅色为执行器中执行，深色为存储引擎中执行**
+
+1. 执行器首先找到ID=2这一行。
+2. 执行器得到值后将值加1，再调用写入接口将结果写回数据库
+3. 存储引擎将数据更新到内存
+4. 存储引擎将更新操作记录到redo log里面，此时redo log处于prepare，告知执行器随时可以提交事务
+5. 执行器生成这次操作的binlog，将binlog写入磁盘
+6. 执行器调用引擎的提交事务接口，引擎将redo log改成commit状态
+
+## 两阶段提交
+
+可以看到，整个更新过程redo log日志是两阶段提交，首先置为prepare状态，最后在提交事务的时候变为commit状态。这是为了保证两份日志之间的逻辑一致，而如果不这么做会产生一些问题：
+
+1. 先写redo log再写binlog。假设redo log先写完，而binlog还没有写完，MySQL进程异常重启。重启之后，redo log能把数据恢复，此时数据库不会有问题。但是如果当你需要通过binlog来恢复数据库的时候，由于binlog没有记录到这次操作，那么恢复出来的数据就是有问题的。
+2. 先写binlog再写redo log。假设binlog写完，而redo log还没写，MySQL进程异常重启。重启之后，崩溃前的事务执行无效，因此update操作没有成功，但是binlog已经记录下了这次没成功的操作，之后恢复出来的数据同样有问题。
+
+## Tips
+
+**innodb_flush_log_at_trx_commit**这个参数设为1的时候代表每次redo log都直接持久化到硬盘，建议设置，保证每次异常重启后数据不丢失；
+
+**sync_binlog**这个参数设为1的时候代表每次binlog都持久化到硬盘，建议设置，保证异常重启后binlog不丢失
