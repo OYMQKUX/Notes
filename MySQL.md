@@ -252,11 +252,11 @@ LSM树，跳表等。
 
 ```mysql
 create table T(
-	id int primary key,
-    k int not null,
-    name varchar(16),
-    index (k
-)) engine=InnoDB;
+	ID int primary key,
+	k int not null,
+	name varchar(16),
+	index k(k)
+) engine=InnoDB;
 ```
 
 ![img](https://static001.geekbang.org/resource/image/dc/8d/dcda101051f28502bd5c4402b292e38d.png)
@@ -284,3 +284,80 @@ B+树为了维护索引的有序，在插入值的时候需要做维护。以上
 在插入新的值的时候，可以不指定主键的值，系统会获取当前ID最大值，自动加一作为新数据的主键。这样插入的数据保证主键从小到大依次插入，不会触发之前说的数据挪动和叶分裂等问题。除了性能方面，从存储空间方面来看，也是自增主键优势大一些。以身份证号-名字为例，非主键B+树上记录的值为主键的值，如果以身份证号为主键，那么需要18个字节；而如果使用自增主键，那么只需要4个字节（整型，长整型为8个字节）。**因此，主键长度越小，普通索引B+树的叶子节点占用空间就越小。**
 
 当然，只有一个索引，且该索引必须作为唯一索引就应该使用该字段作为索引。因为这种情况不存在普通索引B+树，而且性能上能防止多一次回表查询。
+
+## 覆盖索引
+
+```mysql
+create table T(
+	ID int primary key,
+	k int NOT NULL DEFAULT 0,
+	s varchar(16) NOT NULL DEFAULT '',
+	index k(k)
+)engine=InnoDB;
+insert into T values(100, 1, 'aa'), (200, 2, 'bb'),
+(300, 3, 'cc'), (500, 5, 'ee'), (600, 6, 'ff'), 
+(700, 7, 'gg');
+```
+
+以以上建表为例，如果我们需要查询k为3~5的数据行，即：
+
+```mysql
+select * from T where k between 3 and 5;
+```
+
+具体执行过程如下：
+
+1. 在k索引树上找到k=3的记录，取到主键ID=300；
+2. 再去ID索引树上找到ID=300对应的数据；
+3. 再去k索引树找到k=5的记录，取到主键ID=500；
+4. 再去ID索引树找到ID=500对应的数据；
+5. 再去k索引树上找到k=6的记录，没有记录，循环结束；
+
+这个过程显然比较繁琐，实际可以进行优化。
+
+如果我们的查询语句改成：
+
+```mysql
+select ID from T where k between 3 and 5;
+```
+
+那么就不需要再去主索引树上进行回表查询，此时k就称为这种需求的覆盖索引。覆盖索引其实就是一种特殊的联合索引。
+
+## 最左前缀原则
+
+索引能够加快数据查询速度，但是如果每种查询情况都要额外引入索引，那么索引就太多了，因此需要做一定的设计考量。**B+树的索引结构，可以利用该索引的最左前缀来定位数据位置。**
+
+![img](https://static001.geekbang.org/resource/image/89/70/89f74c631110cfbc83298ef27dcd6370.jpg)
+
+以上图为例，联合索引是有顺序的，例如查询名字为张三的人，B+树可以快速定位到第一个符合的结果ID4；甚至要查询姓张的人，也可以快速定位；
+
+基于这个原则，建立联合索引的时候需要安排好索引的顺序，**基本原则是尽量少的建立额外索引**，例如建立了联合索引(a,b)就不需要再额外建立索引b了，但是如果需要基于b做查询，那么还是需要另外增加一个索引b，这时候的考虑原则就是空间大小，如果a比b占用的空间小，就应该建立(b, a)索引和a索引。
+
+## 索引下推
+
+```mysql
+CREATE TABLE `tuser` (
+  `id` int(11) NOT NULL,
+  `id_card` varchar(32) DEFAULT NULL,
+  `name` varchar(32) DEFAULT NULL,
+  `age` int(11) DEFAULT NULL,
+  `ismale` tinyint(1) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `id_card` (`id_card`),
+  KEY `name_age` (`name`,`age`)
+) ENGINE=InnoDB
+```
+
+以上表为例，考虑以下查询：
+
+```mysql
+select * from tuser where name like '张%' and age=10 and ismale=1;
+```
+
+根据索引原则，可以很快找到第一个条件，姓为张，之后再一个个回表，找到对应数据行进行值的比对，在MySQL5.6之前的做法是这样。但是在MySQL5.6之后，引入了索引下推优化（index condition pushdown），可以在索引遍历过程中，对索引中包含的字段先做判断，过滤掉一些条件，减少回表次数，区别如下图所示：
+
+![img](https://static001.geekbang.org/resource/image/b3/ac/b32aa8b1f75611e0759e52f5915539ac.jpg)![img](https://static001.geekbang.org/resource/image/76/1b/76e385f3df5a694cc4238c7b65acfe1b.jpg)
+
+第一张图表示，InnoDB只关注符合name的所有结果，再一个个回表查询；
+
+第二张图则是先过滤掉age不满足条件的结果，再回表查询，效率提高了；
